@@ -115,5 +115,7 @@ class Backbone(nn.Module):
         )
         # 160, 160, 256 => 80, 80, 256 => 80, 80, 512
         self.dark3 = nn.Sequential(
+            Transition_Block(transition_channels * 8, transition_channels * 4),
+            Multi_Concat_Block(transition_channels * 8, block_channels * 4, transition_channels * 32, n=n, ids=ids)
 
         )
