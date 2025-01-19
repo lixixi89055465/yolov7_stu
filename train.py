@@ -17,7 +17,10 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from nets.yolo_training import ModelEMA
-from utils.utils import seed_everything
+from nets.yolo import YoloBody
+
+from utils.utils import (seed_everything, get_classes
+, get_anchors,download_weights)
 
 #       对数据集进行训练
 # -------------------------------------#
@@ -269,5 +272,20 @@ if __name__ == '__main__':
     # ------------------------------------------------------#
     #   获取classes和anchor
     # ------------------------------------------------------#
-    ema = ModelEMA(model_train)
+    class_names, num_classes = get_classes(classes_path)
+    anchors, num_anchors = get_anchors(anchors_path)
+    # ----------------------------------------------------#
+    #   下载预训练权重
+    # ----------------------------------------------------#
+    if pretrained:
+        if distributed:
+            if local_rank == 0:
+                download_weights(phi)
+            dist.barrier()
+        else:
+            download_weights(phi)
 
+    # ------------------------------------------------------#
+    #   创建yolo模型
+    # ------------------------------------------------------#
+    model=YoloBody(anchors_mask,num_classes,phi,pretrained=pretrained)
