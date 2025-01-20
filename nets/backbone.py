@@ -116,6 +116,52 @@ class Backbone(nn.Module):
         # 160, 160, 256 => 80, 80, 256 => 80, 80, 512
         self.dark3 = nn.Sequential(
             Transition_Block(transition_channels * 8, transition_channels * 4),
-            Multi_Concat_Block(transition_channels * 8, block_channels * 4, transition_channels * 32, n=n, ids=ids)
+            Multi_Concat_Block(transition_channels * 8,
+                               block_channels * 4,
+                               transition_channels * 32,
+                               n=n,
+                               ids=ids))
+        # 80, 80, 512 => 40, 40, 512 => 40, 40, 1024
 
+        self.dark4 = nn.Sequential(
+            Transition_Block(transition_channels * 16, transition_channels * 8),
+            Multi_Concat_Block(transition_channels * 16, block_channels * 8, transition_channels * 32, n=n, ids=ids)
         )
+        # 40, 40, 1024 => 20, 20, 1024 => 20, 20, 1024
+        self.dark5 = nn.Sequential(
+            Transition_Block(transition_channels * 32, transition_channels * 16),
+            Multi_Concat_Block(transition_channels * 32, block_channels * 8,
+                               transition_channels * 32, n=n, ids=ids)
+        )
+        if pretrained:
+            url = {
+                "l": 'https://github.com/bubbliiiing/yolov7-pytorch/releases/download/v1.0/yolov7_backbone_weights.pth',
+                "x": 'https://github.com/bubbliiiing/yolov7-pytorch/releases/download/v1.0/yolov7_x_backbone_weights.pth',
+            }[phi]
+            checkpoint = torch.hub.load_state_dict_from_url(
+                url=url,
+                map_location='cpu',
+                model_dir='./model_data'
+            )
+            self.load_state_dict(checkpoint, strict=False)
+            print('Load weights from ' + url.split('/')[-1])
+
+    def forward(self, x):
+        x = self.stem(x)
+        x = self.dark2(x)
+        # -----------------------------------------------#
+        #   dark3的输出为80, 80, 512，是一个有效特征层
+        # -----------------------------------------------#
+        x = self.dark3(x)
+        feat1 = x
+        # -----------------------------------------------#
+        #   dark4的输出为40, 40, 1024，是一个有效特征层
+        # -----------------------------------------------#
+        x = self.dark4(x)
+        feat2 = x
+        # -----------------------------------------------#
+        #   dark5的输出为20, 20, 1024，是一个有效特征层
+        # -----------------------------------------------#
+        x = self.dark5(x)
+        feat3 = x
+        return feat1, feat2, feat3

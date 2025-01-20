@@ -92,7 +92,7 @@ class YoloBody(nn.Module):
         # 20, 20, 1024 => 20, 20, 512
         self.sppcspc = SPPCSPC(transition_channels * 32, transition_channels * 16)
         # 20, 20, 512 => 20, 20, 256 => 40, 40, 256
-        self.conv_for_p5 = Conv(transition_channels * 16, transition_channels * 8)
+        self.conv_for_P5 = Conv(transition_channels * 16, transition_channels * 8)
         # 40, 40, 1024 => 40, 40, 256
         self.conv_for_feat2 = Conv(transition_channels * 32, transition_channels * 8)
         # 40, 40, 512 => 40, 40, 256
@@ -104,7 +104,52 @@ class YoloBody(nn.Module):
             n=n,
             ids=ids
         )
+        self.down_sample1 = Transition_Block(transition_channels * 4, transition_channels * 4)
+        # 40, 40, 512 => 40, 40, 256
+        self.conv3_for_downsample1 = Multi_Concat_Block(
+            transition_channels * 16,
+            panet_channels * 4,
+            transition_channels * 8,
+            e=e,
+            n=n,
+            ids=ids
+        )
+
+        # 40, 40, 256 => 40, 40, 128 => 80, 80, 128
+        self.conv_for_P4 = Conv(transition_channels * 8, transition_channels * 4)
+        # 80, 80, 512 => 80, 80, 128
+        self.conv_for_feat1 = Conv(transition_channels * 16, transition_channels * 4)
+        # 80, 80, 256 => 80, 80, 128
+        self.conv3_for_upsample2 = (
+            Multi_Concat_Block(transition_channels * 8,
+                               panet_channels * 2,
+                               transition_channels * 4,
+                               e=e,
+                               n=n,
+                               ids=ids))
 
     def forward(self, x):
         # backbone
         feat1, feat2, feat3 = self.backbone.forward(x)
+        # ------------------------加强特征提取网络------------------------#
+        # 20, 20, 1024 => 20, 20, 512
+        P5 = self.sppcspc(feat3)
+        # 20, 20, 512 => 20, 20, 256
+        P5_conv = self.conv_for_p5(P5)
+        # 20, 20, 256 => 40, 40, 256
+        P5_upsample = self.upsample(P5_conv)
+        # 40, 40, 256 cat 40, 40, 256 => 40, 40, 512
+        P4 = torch.cat([self.conv_for_feat2(feat2), P5_upsample], 1)
+        # 40, 40, 512 => 40, 40, 256
+        P4 = self.conv3_for_upsample1(P4)
+        # 40, 40, 256 => 40, 40, 128
+        P4_conv = self.conv_for_P4(P4)
+        # 40, 40, 128 => 80, 80, 128
+        P4_upsample = self.upsample(P4_conv)
+        # 80, 80, 128 cat 80, 80, 128 => 80, 80, 256
+        P3 = torch.cat([self.conv_for_feat1(feat1), P4_upsample], 1)
+        # 80, 80, 256 => 80, 80, 128
+        P3 = self.conv3_for_upsample2(P3)
+
+        # 80, 80, 128 => 40, 40, 256
+        P3_downsample = self.down_sample1(P3)
