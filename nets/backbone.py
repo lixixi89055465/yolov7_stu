@@ -165,3 +165,22 @@ class Backbone(nn.Module):
         x = self.dark5(x)
         feat3 = x
         return feat1, feat2, feat3
+
+
+class Transition_Block(nn.Module):
+    def __init__(self, c1, c2):
+        super(Transition_Block, self).__init__()
+        self.cv1 = Conv(c1, c2, 1, 1)
+        self.cv2 = Conv(c1, c2, 1, 1)
+        self.cv3 = Conv(c2, c2, 3, 2)
+        self.mp = MP()
+
+    def forward(self, x):
+        # 160, 160, 256 => 80, 80, 256 => 80, 80, 128
+        x_1 = self.mp(x)
+        x_1 = self.cv1(x_1)
+        # 160, 160, 256 => 160, 160, 128 => 80, 80, 128
+        x_2 = self.cv2(x)
+        x_2 = self.cv3(x_2)
+        # 80, 80, 128 cat 80, 80, 128 => 80, 80, 256
+        return torch.cat([x_2, x_1], 1)

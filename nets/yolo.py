@@ -7,7 +7,7 @@
 # @Comment :
 
 import torch.nn as nn
-from nets.backbone import SiLU, autopad, Conv, Backbone, Multi_Concat_Block
+from nets.backbone import SiLU, autopad, Conv, Backbone, Multi_Concat_Block, Transition_Block
 import torch
 
 
@@ -127,6 +127,21 @@ class YoloBody(nn.Module):
                                e=e,
                                n=n,
                                ids=ids))
+        # 40, 40, 256 => 20, 20, 512
+        self.down_sample2 = Transition_Block(
+            transition_channels * 8,
+            transition_channels * 8)
+        # 20, 20, 1024 => 20, 20, 512
+        self.conv3_for_downsample2 = Multi_Concat_Block(
+            transition_channels * 32,
+            panet_channels * 8,
+            transition_channels * 16,
+            e=e,
+            n=n,
+            ids=ids
+        )
+        # ------------------------加强特征提取网络------------------------#
+        # 80, 80, 128 => 80, 80, 256
 
     def forward(self, x):
         # backbone
@@ -135,7 +150,7 @@ class YoloBody(nn.Module):
         # 20, 20, 1024 => 20, 20, 512
         P5 = self.sppcspc(feat3)
         # 20, 20, 512 => 20, 20, 256
-        P5_conv = self.conv_for_p5(P5)
+        P5_conv = self.conv_for_P5(P5)
         # 20, 20, 256 => 40, 40, 256
         P5_upsample = self.upsample(P5_conv)
         # 40, 40, 256 cat 40, 40, 256 => 40, 40, 512
@@ -153,3 +168,25 @@ class YoloBody(nn.Module):
 
         # 80, 80, 128 => 40, 40, 256
         P3_downsample = self.down_sample1(P3)
+        # 40, 40, 256 cat 40, 40, 256 => 40, 40, 512
+        P4 = torch.cat([P3_downsample, P4], 1)
+        # 40, 40, 512 => 40, 40, 256
+        P4 = self.conv3_for_downsample1(P4)
+        # 40, 40, 256 => 20, 20, 512
+        P4_downsample = self.down_sample2(P4)
+        # 20, 20, 512 cat 20, 20, 512 => 20, 20, 1024
+        P5 = torch.cat([P4_downsample, P5], 1)
+        # 20, 20, 1024 => 20, 20, 512
+        P5 = self.conv3_for_downsample2(P5)
+        # ------------------------加强特征提取网络------------------------#
+        # P3 80, 80, 128
+        # P4 40, 40, 256
+        # P5 20, 20, 512
+        P3 = self.rep_conv_1(P3)
+        P4 = self.rep_conv_2(P4)
+        P5 = self.rep_conv_3(P5)
+        # ---------------------------------------------------#
+        #   第三个特征层
+        #   y3=(batch_size, 75, 80, 80)
+        # ---------------------------------------------------#
+        out2 = self.yolo_head_P3(P3)
