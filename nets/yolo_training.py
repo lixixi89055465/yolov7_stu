@@ -484,3 +484,106 @@ class YOLOLoss(nn.Module):
                 torch.log(y / (1 - y)), gt_cls_per_image,
                 reduction='none'
             ).sum(-1)
+            del cls_preds_
+            # -------------------------------------------#
+            #   求cost的总和
+            # -------------------------------------------#
+            cost = (
+                    pair_wise_cls_loss + 3.0 * pair_wise_iou_loss
+            )
+            # -------------------------------------------#
+            #   求cost最小的k个预测框
+            # -------------------------------------------#
+            matching_matrix = torch.zeros_like(cost)
+            for gt_idx in range(num_gt):
+                _, pos_idx = torch.topk(cost[gt_idx], \
+                                        k=dynamic_ks[gt_idx].item(), \
+                                        largest=False)
+                matching_matrix[gt_idx] = 1.0
+            del top_k, dynamic_ks
+            # -------------------------------------------#
+            #   如果一个预测框对应多个真实框
+            #   只使用这个预测框最对应的真实框
+            # -------------------------------------------#
+            anchor_matching_gt = matching_matrix.sum(0)
+            if (anchor_matching_gt > 1).sum() > 0:
+                _, cost_argmin = torch.min(cost[:, anchor_matching_gt > 1], dim=0)
+                matching_matrix[:, anchor_matching_gt > 1] *= 0.0
+                matching_matrix[cost_argmin, anchor_matching_gt > 1] = 1.0
+            fg_mask_inboxes = matching_matrix.sum(0) > 0.0
+            matched_gt_inds = matching_matrix[:, fg_mask_inboxes].argmax(0)
+            # -------------------------------------------#
+            #   取出符合条件的框
+            # -------------------------------------------#
+            from_which_layer = from_which_layer.to(fg_mask_inboxes.device)[fg_mask_inboxes]
+            all_b = all_b[fg_mask_inboxes]
+            all_a = all_a[fg_mask_inboxes]
+            all_gj = all_gj[fg_mask_inboxes]
+            all_gi = all_gi[fg_mask_inboxes]
+            all_anch = all_anch[fg_mask_inboxes]
+            this_target = this_target[matched_gt_inds]
+            for i in range(num_layer):
+                layer_idx = from_which_layer == i
+                matching_bs[i].append(all_b[layer_idx])
+                matching_as[i].append(all_a[layer_idx])
+                matching_gjs[i].append(all_gj[layer_idx])
+                matching_gis[i].append(all_gi[layer_idx])
+                matching_targets[i].append(this_target[layer_idx])
+                matching_anchs[i].append(all_anch[layer_idx])
+        for i in range(num_layer):
+            layer_idx = from_which_layer == i
+            matching_bs[i].append(all_b[layer_idx])
+            matching_as[i].append(all_a[layer_idx])
+            matching_gjs[i].append(all_gj[layer_idx])
+            matching_gis[i].append(all_gi[layer_idx])
+            matching_targets[i].append(this_target[layer_idx])
+            matching_anchs[i].append(all_anch[layer_idx])
+        return matching_bs, matching_as, matching_gjs, \
+            matching_gis, matching_targets, matching_anchs
+
+    def find_3_positive(self, predictions, targets):
+        # ------------------------------------#
+        #   获得每个特征层先验框的数量
+        #   与真实框的数量
+        # ------------------------------------#
+        num_anchor, num_gt = len(self.anchors_mask[0]), targets.shape[0]
+        # ------------------------------------#
+        #   创建空列表存放indices和anchors
+        # ------------------------------------#
+        indices, anchors = [], []
+        # ------------------------------------#
+        #   创建7个1
+        #   序号0,1为1
+        #   序号2:6为特征层的高宽
+        #   序号6为1
+        # ------------------------------------#
+        gain = torch.ones(7, device=targets.device)
+        # ------------------------------------#
+        #   ai      [num_anchor, num_gt]
+        #   targets [num_gt, 6] => [num_anchor, num_gt, 7]
+        # ------------------------------------
+        ai = torch.arange(num_anchor, device=targets.device).float().view(num_anchor, 1).repeat(1, num_gt)
+        targets = torch.cat((targets.repeat(num_anchor, 1, 1), ai[:, :, None]), 2)
+        g = 0.5  # offsets
+        off = torch.tensor(
+            [[0, 0],
+             [1, 0], [0, 1], [-1, 0], [0, -1],  # j,k,l,m
+             ], device=targets.device).float() * g
+        for i in range(len(predictions)):
+            # ----------------------------------------------------#
+            #   将先验框除以stride，获得相对于特征层的先验框。
+            #   anchors_i [num_anchor, 2]
+            # ----------------------------------------------------#
+            anchors_i = torch.from_numpy(self.anchors[i] / self.stride[i]).type_as(predictions[i])
+            anchors_i, shape = torch.from_numpy(self.anchors[i] / self.stride[i]).type_as(predictions[i].shape)
+            # -------------------------------------------#
+            #   计算获得对应特征层的高宽
+            # -------------------------------------------#
+            gain[2:6] = torch.tensor(predictions[i].shape)[[3, 2, 3, 2]]
+            # -------------------------------------------#
+            #   将真实框乘上gain，
+            #   其实就是将真实框映射到特征层上
+            # -------------------------------------------
+            t = targets * gain
+            if num_gt:
+                pass
