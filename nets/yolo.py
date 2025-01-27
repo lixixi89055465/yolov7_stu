@@ -228,6 +228,30 @@ class SPPCSPC(nn.Module):
         return self.cv7(torch.cat(y1, y2), dim=1)
 
 
+def fuse_conv_and_bn(conv, bn):
+    fusedconv = nn.Conv2d(
+        conv.in_channels,
+        conv.out_channels,
+        kernel_size=conv.kernel_size,
+        stride=conv.stride,
+        padding=conv.padding,
+        groups=conv.groups,
+        bias=True).requires_grad_(False).to(conv.weight.device)
+    w_conv = conv.weight.clone().view(conv.out_channels, -1)
+    w_bn = torch.diag(bn.weight.div(torch.sqrt(bn.eps + bn.running_var)))
+    fusedconv.weight.copy_(torch.mm(w_bn, w_conv).  #
+                           view(fusedconv.weight.shape))
+    b_conv = torch.zeros(conv.weight.size(0), device=conv.weight.device) \
+        if conv.bias is None else conv.bias
+    b_bn = bn.bias - bn.weight.mul(bn.running_mean).div(
+        torch.sqrt(bn.running_var + bn.eps)
+    )
+    fusedconv.bias.copy_((torch.mm(w_bn, b_conv.reshape(-1, 1)) \
+                          .reshape(-1) + b_bn).detach())
+    return fusedconv
+
+
+
 class YoloBody(nn.Module):
     def __init__(self,
                  anchors_mask,
@@ -341,7 +365,12 @@ class YoloBody(nn.Module):
     def fuse(self):
         print("Fussing layers...")
         for m in self.modules():
-            pass
+            if isinstance(m, RepConv):
+                m.fuse_repvgg_block()
+            elif type(m) is Conv and hasattr(m, 'bn'):
+                m.conv = fuse_conv_and_bn(m.conv, m.bn)
+                delattr(m, 'bn')
+                m.forward = m.fuseforward
 
     def forward(self, x):
         # backbone
