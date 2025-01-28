@@ -16,11 +16,13 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from nets.yolo_training import (ModelEMA, weights_init)
+from nets.yolo_training import (ModelEMA, weights_init, YOLOLoss,\
+                                get_lr_scheduler)
 from nets.yolo import YoloBody
 
 from utils.utils import (seed_everything, get_classes
-, get_anchors, download_weights)
+, get_anchors, download_weights, show_config)
+from utils.callbacks import LossHistory
 
 #       对数据集进行训练
 # -------------------------------------#
@@ -322,7 +324,165 @@ if __name__ == '__main__':
     # ----------------------#
     #   获得损失函数
     # ----------------------#
-    yolo_loss = YOLOLoss(anchors, num_classes,
+    yolo_loss = YOLOLoss(anchors,
+                         num_classes,
                          input_shape,
                          anchors_mask,
                          label_smoothing)
+    # ----------------------#
+    #   记录Loss
+    # ----------------------#
+    if local_rank == 0:
+        time_str = datetime.datetime.strftime(
+            datetime.datetime.now(), '%Y_%m_%d_%H_%M_%S')
+        log_dir = os.path.joiin(save_dir, 'loss_' + str(time_str))
+        loss_history = LossHistory(log_dir, model, input_shape=input_shape)
+    else:
+        loss_history = None
+    # ------------------------------------------------------------------#
+    #   torch 1.2不支持amp，建议使用torch 1.7.1及以上正确使用fp16
+    #   因此torch1.2这里显示"could not be resolve"
+    # ------------------------------------------------------------------#
+    if fp16:
+        from torch.cuda.amp import GradScaler as GradScaler
+
+        scaler = GradScaler()
+    else:
+        scaler = None
+    model_train = model.train()
+    # ----------------------------#
+    #   多卡同步Bn
+    # ----------------------------#
+    if sync_bn and ngpus_per_node > 1 and distributed:
+        model_train = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model_train)
+    elif sync_bn:
+        print('Sync_bn is not support in one gpu or not distributed ')
+    if Cuda:
+        if distributed:
+            # ----------------------------#
+            #   多卡平行运行
+            # ----------------------------#
+            model_train = model_train.cuda(local_rank)
+            model_train = torch.nn.parallel.DistributedDataParallel(
+                model_train, \
+                device_ids=[local_rank], \
+                find_unused_parameters=True
+            )
+        else:
+            model_train = torch.nn.DataParallel(model)
+            cudnn.benchmark = True
+            model_train = model_train.cuda()
+    # ----------------------------#
+    #   权值平滑
+    # ----------------------------#
+    ema = ModelEMA(model_train)
+
+    # ---------------------------#
+    #   读取数据集对应的txt
+    # ---------------------------#
+    with open(train_annotation_path, encoding='utf-8') as f:
+        train_lines = f.readlines()
+    with open(val_annotation_path, encoding='utf-8') as f:
+        val_lines = f.readlines()
+    num_train = len(train_lines)
+    num_val = len(val_lines)
+    if local_rank == 0:
+        show_config(
+            classes_path=classes_path,
+            anchors_path=anchors_path,
+            anchors_mask=anchors_mask,
+            model_path=model_path,
+            input_shape=input_shape, \
+            Init_Epoch=Init_Epoch,
+            Freeze_Epoch=Freeze_Epoch,
+            UnFreeze_Epoch=UnFreeze_Epoch,
+            Freeze_batch_size=Freeze_batch_size,
+            Unfreeze_batch_size=Unfreeze_batch_size,
+            Freeze_Train=Freeze_Train, \
+            Init_lr=Init_lr, \
+            Min_lr=Min_lr,
+            optimizer_type=optimizer_type,
+            momentum=momentum,
+            lr_decay_type=lr_decay_type, \
+            save_period=save_period,
+            save_dir=save_dir,
+            num_workers=num_workers,
+            num_train=num_train,
+            num_val=num_val
+        )
+        # ---------------------------------------------------------#
+        #   总训练世代指的是遍历全部数据的总次数
+        #   总训练步长指的是梯度下降的总次数
+        #   每个训练世代包含若干训练步长，每个训练步长进行一次梯度下降。
+        #   此处仅建议最低训练世代，上不封顶，计算时只考虑了解冻部分
+        # ----------------------------------------------------------#
+        wanted_step = 5e4 if optimizer_type == 'sgd' else 1.5e4
+        total_step = num_train // Unfreeze_batch_size * UnFreeze_Epoch
+        if total_step <= wanted_step:
+            if num_train // Unfreeze_batch_size == 0:
+                raise ValueError('数据集过小，无法进行训练，请扩充数据集。')
+            wanted_epoch = wanted_step // (num_train // Unfreeze_batch_size) + 1
+            print("\n\033[1;33;44m[Warning] 使用%s优化器时，建议将训练总步长设置到%d以上。\033[0m" % (
+                optimizer_type, wanted_step))
+            print(
+                "\033[1;33;44m[Warning] 本次运行的总训练数据量为%d，Unfreeze_batch_size为%d，共训练%d个Epoch，计算出总训练步长为%d。\033[0m" % (
+                    num_train, Unfreeze_batch_size, UnFreeze_Epoch, total_step))
+            print("\033[1;33;44m[Warning] 由于总训练步长为%d，小于建议总步长%d，建议设置总世代为%d。\033[0m" % (
+                total_step, wanted_step, wanted_epoch))
+
+    # ------------------------------------------------------#
+    #   主干特征提取网络特征通用，冻结训练可以加快训练速度
+    #   也可以在训练初期防止权值被破坏。
+    #   Init_Epoch为起始世代
+    #   Freeze_Epoch为冻结训练的世代
+    #   UnFreeze_Epoch总训练世代
+    #   提示OOM或者显存不足请调小Batch_size
+    # ------------------------------------------------------#
+    if True:
+        UnFreeze_flag = False
+        # ------------------------------------#
+        #   冻结一定部分训练
+        # ------------------------------------#
+        if Freeze_Train:
+            for param in model.backbone.parameters():
+                param.requires_grad = False
+        # -------------------------------------------------------------------#
+        #   如果不冻结训练的话，直接设置batch_size为Unfreeze_batch_size
+        # -------------------------------------------------------------------#
+        batch_size = Freeze_batch_size if Freeze_Train else Unfreeze_batch_size
+
+        # -------------------------------------------------------------------#
+        #   判断当前batch_size，自适应调整学习率
+        # -------------------------------------------------------------------#
+        nbs = 64
+        lr_limit_max = 1e-3 if optimizer_type == 'adam' else 5e-2
+        lr_limit_min = 3e-4 if optimizer_type == 'adam' else 5e-4
+
+        Init_lr_fit = min(max(batch_size / nbs * Init_lr, lr_limit_min), lr_limit_max)
+        Min_lr_fit = min(max(batch_size / nbs * Min_lr, lr_limit_min * 1e-2), lr_limit_max * 1e-2)
+
+        # ---------------------------------------#
+        #   根据optimizer_type选择优化器
+        # ---------------------------------------#
+        pg0, pg1, pg2 = [], [], []
+        for k, v in model.named_modules():
+            if hasattr(v, 'bias') and isinstance(v.bias, nn.Parameter):
+                pg2.append(v.bias)
+            if isinstance(v, nn.BatchNorm2d) or 'bn' in k:
+                pg0.append(v.weight)
+            elif hasattr(v, 'weight') and isinstance(v.weight, nn.Parameter):
+                pg1.append(v.weight)
+        optimiizer = {
+            'adam': optim.Adam(pg0, Init_lr_fit, betas=(momentum, 0.999)),
+            'sgd': optim.SGD(pg0, Init_lr_fit, momentum=momentum, nesterov=True)
+        }[optimizer_type]
+        optimiizer.add_param_group({'params': pg1, 'weight_decay': weight_decay})
+        optimiizer.add_param_group({'params': pg2})
+
+        # ---------------------------------------#
+        #   获得学习率下降的公式
+        # ---------------------------------------#
+        lr_scheduler_func = get_lr_scheduler(lr_decay_type, \
+                                             Init_lr_fit, \
+                                             Min_lr_fit,
+                                             UnFreeze_Epoch)

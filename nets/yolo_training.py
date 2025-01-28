@@ -586,4 +586,104 @@ class YOLOLoss(nn.Module):
             # -------------------------------------------
             t = targets * gain
             if num_gt:
-                pass
+                # -------------------------------------------#
+                #   计算真实框与先验框高宽的比值
+                #   然后根据比值大小进行判断，
+                #   判断结果用于取出，获得所有先验框对应的真实框
+                #   r   [num_anchor, num_gt, 2]
+                #   t   [num_anchor, num_gt, 7] => [num_matched_anchor, 7]
+                # -------------------------------------------#
+                r = t[:, :, 4:6] / anchors_i[:, None]
+                j = torch.max(r, 1. / r).max(2)[0] < self.threshold
+                t = t[j]  # filter
+
+                # -------------------------------------------#
+                #   gxy 获得所有先验框对应的真实框的x轴y轴坐标
+                #   gxi 取相对于该特征层的右小角的坐标
+                # -------------------------------------------#
+                gxy = t[:, 2:4]  # grid xy
+                gxi = gain[[2, 3]] - gxy  # inverse
+                j, k = ((gxy % 1. < g) & (gxy > 1.0)).T
+                l, m = ((gxi % 1. < g) & (gxi > 1.)).T
+                j = torch.stack((torch.ones_like(j), j, k, l, m))
+                # -------------------------------------------#
+                #   t   重复5次，使用满足条件的j进行框的提取
+                #   j   一共五行，代表当前特征点在五个
+                #       [0, 0], [1, 0], [0, 1], [-1, 0], [0, -1]
+                #       方向是否存在
+                # -------------------------------------------#
+                t = t.repeat((5, 1, 1))[j]
+                offsets = (torch.zeros_like(gxy)[None] + off[:, None])[j]
+            else:
+                t = targets[0]
+                offsets = 0
+            # -------------------------------------------#
+            #   b   代表属于第几个图片
+            #   gxy 代表该真实框所处的x、y中心坐标
+            #   gwh 代表该真实框的wh坐标
+            #   gij 代表真实框所属的特征点坐标
+            # -------------------------------------------#
+            b, c = t[:, :2].long().T
+            gxy = t[:, 2:4]  # grid xy
+            gwh = t[:, 4:6]  # grid wh
+            gij = (gxy - offsets).long()
+            gi, gj = gij.T  # gride xy indices
+            # -------------------------------------------#
+            #   gj、gi不能超出特征层范围
+            #   a代表属于该特征点的第几个先验框
+            # -------------------------------------------#
+            a = t[:, 6].long()  # anchor indices
+            indices.append(
+                (b, a, gj.clamp_(0, shape[2] - 1), gi.clamp_(0, shape[3] - 1)))
+            # image anchor ,grid indices
+            anchors.append(anchors_i[a])  # anchors
+        return indices, anchors
+
+
+def is_parallel(model):
+    pass
+
+
+def get_lr_scheduler(lr_decay_type, \
+                     lr, \
+                     mim_lr, \
+                     total_iters, \
+                     warmup_iters_ratio=0.05, \
+                     warmup_lr_ratio=0.1,
+                     no_aug_iter_ratio=0.05,
+                     step_num=10):
+    def yolox_warm_cos_lr(lr, \
+                          min_lr, \
+                          total_iters, \
+                          warmup_total_iters, \
+                          warmup_lr_start, \
+                          no_aug_iter, \
+                          iters
+                          ):
+        if iters <= warmup_total_iters:
+            lr = ((lr - warmup_lr_start) * \
+                  pow(iters / float(warmup_total_iters), 2) \
+                  + warmup_lr_start)
+        elif iters >= total_iters - no_aug_iter:
+            lr = min_lr
+        else:
+            lr = min_lr + 0.5 * (lr - min_lr) * (
+                    1.0
+                    +
+                    math.cos(
+                        math.pi *
+                        (iters - warmup_total_iters) / (total_iters - warmup_total_iters - no_aug_iter)
+                    )
+            )
+        return lr
+
+    def step_lr(lr, decay_rate, step_size, iters):
+        if step_size < 1:
+            raise ValueError('step size must above 1. ')
+        n = iters // step_size
+        out_lr = lr * decay_rate ** n
+        return out_lr
+
+    if lr_decay_type == 'cos':
+        warmup_total_iters = min(max(warmup_iters_ratio * total_iters, 1), 3)
+        warmup_lr_start = max(warmup_lr_ratio * lr, 1e-6)
