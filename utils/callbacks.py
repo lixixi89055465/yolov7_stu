@@ -64,3 +64,10 @@ class LossHistory():
         plt.cla()
         plt.close('all')
 
+
+class EvalCallback():
+    def __init__(self,
+                 net,
+                 input_shape,
+                 anchor):
+        pass

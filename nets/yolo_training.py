@@ -646,7 +646,7 @@ def is_parallel(model):
 
 def get_lr_scheduler(lr_decay_type, \
                      lr, \
-                     mim_lr, \
+                     min_lr, \
                      total_iters, \
                      warmup_iters_ratio=0.05, \
                      warmup_lr_ratio=0.1,
@@ -687,3 +687,23 @@ def get_lr_scheduler(lr_decay_type, \
     if lr_decay_type == 'cos':
         warmup_total_iters = min(max(warmup_iters_ratio * total_iters, 1), 3)
         warmup_lr_start = max(warmup_lr_ratio * lr, 1e-6)
+        no_aug_iter = min(max(no_aug_iter_ratio * total_iters, 1), 15)
+        func = partial(
+            yolox_warm_cos_lr, \
+            min_lr, \
+            total_iters, \
+            warmup_total_iters, \
+            warmup_lr_start, \
+            no_aug_iter
+        )
+    else:
+        decay_rate = (min_lr / lr) ** (1 / (step_num - 1))
+        step_size = total_iters / step_num
+        func = partial(step_lr, lr, decay_rate, step_size)
+    return func
+
+
+def set_optimizer_lr(optimizer, lr_scheduler_func, epoch):
+    lr = lr_scheduler_func(epoch)
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr

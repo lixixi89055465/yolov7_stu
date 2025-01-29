@@ -16,13 +16,14 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from nets.yolo_training import (ModelEMA, weights_init, YOLOLoss,\
+from nets.yolo_training import (ModelEMA, weights_init, YOLOLoss, \
                                 get_lr_scheduler)
 from nets.yolo import YoloBody
 
 from utils.utils import (seed_everything, get_classes
-, get_anchors, download_weights, show_config)
+, get_anchors, download_weights, show_config, worker_init_fn)
 from utils.callbacks import LossHistory
+from utils.dataloader import YoloDataset, yolo_dataset_collate
 
 #       对数据集进行训练
 # -------------------------------------#
@@ -486,3 +487,93 @@ if __name__ == '__main__':
                                              Init_lr_fit, \
                                              Min_lr_fit,
                                              UnFreeze_Epoch)
+        # ---------------------------------------#
+        #   判断每一个世代的长度
+        # ---------------------------------------#
+        epoch_step = num_train // batch_size
+        epoch_step_val = num_val // batch_size
+        if epoch_step == 0 or epoch_step_val == 0:
+            raise ValueError('数据集过小，无法继续进行训练，请扩充数据集。')
+        if ema:
+            ema.updates = epoch_step * Init_Epoch
+
+        # ---------------------------------------#
+        #   构建数据集加载器。
+        # ---------------------------------------#
+        train_dataset = YoloDataset(
+            train_lines,
+            input_shape,
+            num_classes,
+            anchors,
+            anchors_mask,
+            epoch_length=UnFreeze_Epoch,
+            mosaic=mosaic,
+            mixup=mixup,
+            mosaic_prob=mosaic_prob, \
+            mixup_prob=mixup_prob, \
+            train=True, \
+            special_aug_ratio=special_aug_ratio
+        )
+        val_dataset = YoloDataset(
+            val_lines,
+            input_shape,
+            num_classes,
+            anchors,
+            anchors_mask,
+            epoch_length=UnFreeze_Epoch, \
+            mosaic=False, \
+            mixup=False, \
+            mosaic_prob=0, \
+            mixup_prob=0, \
+            train=False, \
+            special_aug_ratio=0)
+        if distributed:
+            train_sampler = torch.utils.data.distributed.DistributedSampler(
+                train_dataset,
+                shuffle=True,
+            )
+            val_sampler = torch.utils.data.distributed.DistributedSampler(
+                val_dataset,
+                shuffle=False
+            )
+            batch_size = batch_size // ngpus_per_node
+            shuffle = False
+        else:
+            train_sampler = None
+            val_sapler = None
+            shuffle = True
+        gen = DataLoader(
+            train_dataset,
+            shuffle=shuffle,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            pin_memory=True,
+            drop_last=True,
+            collate_fn=yolo_dataset_collate,
+            sampler=train_sampler,
+            worker_init_fn=partial(worker_init_fn,
+                                   rank=rank,
+                                   seed=seed)
+        )
+        gen_val = DataLoader(
+            val_dataset,
+            shuffle=shuffle,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            pin_memory=True,
+            drop_last=True,
+            collate_fn=yolo_dataset_collate,
+            sampler=val_sampler,
+            work_init_fn=partial(
+                worker_init_fn,
+                rank=rank,
+                seed=seed
+            )
+        )
+        # ----------------------#
+        #   记录eval的map曲线
+        # ----------------------#
+        if local_rank==0:
+            eval_callback=EvalCallback(
+
+            )

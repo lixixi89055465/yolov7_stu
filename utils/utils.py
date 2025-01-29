@@ -10,6 +10,11 @@ import numpy as np
 import torch
 
 
+def preprocess_input(image):
+    image /= 255.0
+    return image
+
+
 # ---------------------------------------------------------#
 #   将图像转换成RGB图像，防止灰度图在预测时报错。
 #   代码仅仅支持RGB图像的预测，所有其它类型的图像都会转化成RGB
@@ -81,3 +86,10 @@ def download_weights(phi, model_dir='./model_data'):
     if not os.path.exists(model_dir):
         os.makedirs(model_dir)
     load_state_dict_from_url(url, model_dir)
+
+
+def worker_init_fn(worker_id, rank, seed):
+    worker_seed = rank + seed
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
+    torch.manual_seed(worker_seed)
